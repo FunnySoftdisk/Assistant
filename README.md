@@ -132,22 +132,6 @@ python main.py
 # 访问 http://localhost:8000
 ```
 
----
-
-## Skill预留位置
-
-已在各Agent中预留TODO标记：
-
-| Agent | 预留Skill |
-|-------|-----------|
-| MemoryAgent | preference_learning_skill, memory_consolidation_skill |
-| PreferenceAgent | preference_learning_skill, preference_suggestion_skill |
-| InfoQueryAgent | weather_api_skill, map_api_skill, news_skill, stock_skill |
-| ExecutionAgent | flight_booking_skill, hotel_booking_skill, alarm_system_skill, calendar_api_skill |
-| PlanningAgent | budget_planning_skill, route_optimization_skill, packing_skill |
-
----
-
 ## 目录结构
 
 ```
