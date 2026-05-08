@@ -138,6 +138,19 @@
             margin-right: 36px;
         }
 
+        /* 上下文标记 */
+        .context-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            background: #e3f2fd;
+            border-radius: 10px;
+            font-size: 10px;
+            color: #1976d2;
+            margin-left: 8px;
+        }
+
         /* 工具调用显示 */
         .tool-invocation {
             background: #f0f4ff;
@@ -168,10 +181,16 @@
             border-top: 1px solid #eee;
             display: flex;
             gap: 12px;
+            align-items: flex-end;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
         }
 
         .input-area input {
-            flex: 1;
+            width: 100%;
             padding: 14px 18px;
             border: 2px solid #e8e8e8;
             border-radius: 10px;
@@ -184,6 +203,27 @@
             border-color: #667eea;
         }
 
+        .input-area input:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+        }
+
+        .char-count {
+            position: absolute;
+            bottom: -20px;
+            right: 5px;
+            font-size: 11px;
+            color: #aaa;
+        }
+
+        .char-count.warning {
+            color: #ff9800;
+        }
+
+        .char-count.error {
+            color: #f44336;
+        }
+
         .input-area button {
             padding: 14px 28px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -193,16 +233,43 @@
             cursor: pointer;
             font-weight: 500;
             font-size: 14px;
-            transition: opacity 0.2s;
+            transition: opacity 0.2s, transform 0.1s;
         }
 
-        .input-area button:hover {
+        .input-area button:hover:not(:disabled) {
             opacity: 0.9;
+        }
+
+        .input-area button:active:not(:disabled) {
+            transform: scale(0.98);
         }
 
         .input-area button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+
+        /* 加载状态 */
+        .loading-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 0;
+            color: #666;
+            font-size: 13px;
+        }
+
+        .loading-spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #e0e0e0;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
 
         /* 状态栏 */
@@ -230,6 +297,7 @@
 
         .status-dot.online { background: #4caf50; }
         .status-dot.processing { background: #ff9800; animation: pulse 1s infinite; }
+        .status-dot.error { background: #f44336; }
 
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -367,6 +435,47 @@
             color: white;
         }
 
+        .quick-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* 历史按钮 */
+        .history-btn {
+            padding: 6px 12px;
+            background: #f5f5f5;
+            border: 1px solid #e0e0e0;
+            border-radius: 15px;
+            font-size: 12px;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .history-btn:hover {
+            background: #e0e0e0;
+        }
+
+        /* 错误提示 */
+        .error-toast {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #f44336;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 1000;
+            animation: slideDown 0.3s ease;
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+            to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+
         /* 响应式 */
         @media (max-width: 768px) {
             .sidebar { display: none; }
@@ -413,7 +522,10 @@
 
                 <!-- 输入区 -->
                 <div class="input-area">
-                    <input type="text" id="userInput" placeholder="输入您的问题或指令..." onkeypress="handleEnter(event)">
+                    <div class="input-wrapper">
+                        <input type="text" id="userInput" placeholder="输入您的问题或指令..." onkeypress="handleEnter(event)">
+                        <div class="char-count" id="charCount">0/2000</div>
+                    </div>
                     <button onclick="sendMessage()" id="sendBtn">发送</button>
                 </div>
             </div>
@@ -478,10 +590,17 @@
                 <!-- 快捷操作 -->
                 <div class="sidebar-title" style="margin-top: 20px;">💡 快捷操作</div>
                 <div class="quick-actions">
-                    <button class="quick-btn" onclick="quickAction('搜索今天天气')">🌤️ 查天气</button>
-                    <button class="quick-btn" onclick="quickAction('帮我规划去上海的行程')">✈️ 规划行程</button>
-                    <button class="quick-btn" onclick="quickAction('1+1等于多少')">🧮 计算</button>
-                    <button class="quick-btn" onclick="quickAction('现在几点')">⏰ 现在时间</button>
+                    <button class="quick-btn" onclick="quickAction('搜索今天天气')" id="btn-weather">🌤️ 查天气</button>
+                    <button class="quick-btn" onclick="quickAction('帮我规划去上海的行程')" id="btn-travel">✈️ 规划行程</button>
+                    <button class="quick-btn" onclick="quickAction('1+1等于多少')" id="btn-calc">🧮 计算</button>
+                    <button class="quick-btn" onclick="quickAction('现在几点')" id="btn-time">⏰ 现在时间</button>
+                </div>
+
+                <!-- 会话操作 -->
+                <div class="sidebar-title" style="margin-top: 20px;">📝 会话</div>
+                <div class="quick-actions">
+                    <button class="history-btn" onclick="newSession()">🆕 新会话</button>
+                    <button class="history-btn" onclick="loadHistory()">📜 加载历史</button>
                 </div>
             </div>
         </div>
@@ -489,8 +608,9 @@
         <!-- 状态栏 -->
         <div class="status-bar">
             <div class="status-left">
-                <span><span class="status-dot online"></span>系统正常</span>
+                <span><span class="status-dot online" id="statusDot"></span><span id="statusText">系统正常</span></span>
                 <span id="sessionInfo">会话: 1</span>
+                <span id="turnCount" style="color: #667eea;">第1轮</span>
             </div>
             <div id="responseTime"></div>
         </div>
@@ -500,6 +620,11 @@
         // 全局变量
         let sessionId = 'session_' + Date.now();
         let messageCount = 0;
+        let turnCount = 0;
+        let isProcessing = false;
+        let retryCount = 0;
+        let maxRetries = 2;
+        let conversationHistory = [];  // 本地对话历史
 
         // DOM元素
         const chatBox = document.getElementById('chatBox');
@@ -507,6 +632,46 @@
         const sendBtn = document.getElementById('sendBtn');
         const thinkingProcess = document.getElementById('thinkingProcess');
         const thinkingSteps = document.getElementById('thinkingSteps');
+        const charCount = document.getElementById('charCount');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+
+        // 更新字符计数
+        userInput.addEventListener('input', function() {
+            const len = this.value.length;
+            charCount.textContent = `${len}/2000`;
+            charCount.className = 'char-count';
+            if (len > 2000) {
+                charCount.classList.add('error');
+            } else if (len > 1500) {
+                charCount.classList.add('warning');
+            }
+        });
+
+        // 显示错误提示
+        function showError(message, duration = 3000) {
+            const existing = document.querySelector('.error-toast');
+            if (existing) existing.remove();
+
+            const toast = document.createElement('div');
+            toast.className = 'error-toast';
+            toast.textContent = message;
+            document.body.appendChild(toast);
+
+            setTimeout(() => toast.remove(), duration);
+        }
+
+        // 更新系统状态
+        function updateSystemStatus(status, message) {
+            statusDot.className = 'status-dot ' + status;
+            statusText.textContent = message;
+        }
+
+        // 更新对话轮数显示
+        function updateTurnCount(count) {
+            turnCount = count;
+            document.getElementById('turnCount').textContent = `第${count}轮`;
+        }
 
         // 更新Agent状态
         function updateAgentStatus(agent, status) {
@@ -538,7 +703,7 @@
         }
 
         // 添加消息到聊天框
-        function addMessage(content, type, toolInvocations = []) {
+        function addMessage(content, type, toolInvocations = [], metadata = {}) {
             const time = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
             let toolHtml = '';
@@ -552,13 +717,20 @@
                 `).join('');
             }
 
+            // 上下文标记
+            let contextBadge = '';
+            if (metadata.has_context) {
+                contextBadge = '<span class="context-badge">📎 上下文</span>';
+            }
+
             const messageHtml = `
-                <div class="message ${type}-message">
+                <div class="message ${type}-message" data-turn="${metadata.turn_count || 0}">
                     <div class="message-header">
                         <div class="message-avatar ${type === 'user' ? 'user-avatar' : 'assistant-avatar'}">
                             ${type === 'user' ? '👤' : '🤖'}
                         </div>
                         <span>${type === 'user' ? 'You' : 'Assistant'}</span>
+                        ${contextBadge}
                         <span style="margin-left: auto; font-size: 11px; color: #aaa;">${time}</span>
                     </div>
                     <div class="message-content">
@@ -570,22 +742,139 @@
 
             chatBox.insertAdjacentHTML('beforeend', messageHtml);
             chatBox.scrollTop = chatBox.scrollHeight;
+
+            // 保存到本地历史
+            conversationHistory.push({
+                role: type,
+                content: content,
+                timestamp: Date.now()
+            });
+        }
+
+        // 添加加载指示器
+        function showLoading() {
+            const loadingHtml = `
+                <div class="message assistant-message" id="loadingMessage">
+                    <div class="message-header">
+                        <div class="message-avatar assistant-avatar">🤖</div>
+                        <span>Assistant</span>
+                    </div>
+                    <div class="message-content">
+                        <div class="loading-indicator">
+                            <div class="loading-spinner"></div>
+                            <span>正在处理...</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            chatBox.insertAdjacentHTML('beforeend', loadingHtml);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // 移除加载指示器
+        function removeLoading() {
+            const loading = document.getElementById('loadingMessage');
+            if (loading) loading.remove();
+        }
+
+        // 禁用/启用输入
+        function setInputEnabled(enabled) {
+            userInput.disabled = !enabled;
+            sendBtn.disabled = !enabled;
+            document.querySelectorAll('.quick-btn').forEach(btn => {
+                btn.disabled = !enabled;
+            });
+            isProcessing = !enabled;
+        }
+
+        // 新会话
+        function newSession() {
+            if (isProcessing) return;
+
+            sessionId = 'session_' + Date.now();
+            conversationHistory = [];
+            turnCount = 0;
+
+            // 清空聊天框
+            chatBox.innerHTML = `
+                <div class="message assistant-message">
+                    <div class="message-header">
+                        <div class="message-avatar assistant-avatar">🤖</div>
+                        <span>Assistant</span>
+                        <span style="margin-left: auto; font-size: 11px; color: #aaa;">刚刚</span>
+                    </div>
+                    <div class="message-content">
+                        🆕 已开启新会话，之前的上下文已清空。
+                    </div>
+                </div>
+            `;
+
+            updateTurnCount(0);
+            document.getElementById('sessionInfo').textContent = '会话: 1';
+
+            // 通知服务器删除旧会话
+            fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+
+            userInput.focus();
+        }
+
+        // 加载历史会话
+        async function loadHistory() {
+            if (isProcessing) return;
+
+            try {
+                const response = await fetch(`/api/sessions/${sessionId}/history`);
+                const data = await response.json();
+
+                if (data.history && data.history.length > 0) {
+                    // 清空当前显示
+                    chatBox.innerHTML = '';
+                    conversationHistory = [];
+
+                    // 重新渲染历史消息
+                    for (const msg of data.history) {
+                        const type = msg.role === 'user' ? 'user' : 'assistant';
+                        addMessage(msg.content, type, [], { turn_count: Math.ceil(conversationHistory.length / 2) });
+                    }
+
+                    updateTurnCount(Math.ceil(data.history.length / 2));
+                    messageCount = data.history.length;
+                    document.getElementById('sessionInfo').textContent = `会话: ${messageCount}`;
+                } else {
+                    showError('暂无历史记录');
+                }
+            } catch (error) {
+                showError('加载历史失败');
+            }
         }
 
         // 处理发送
         async function sendMessage() {
+            if (isProcessing) return;
+
             const message = userInput.value.trim();
             if (!message) return;
 
+            // 验证长度
+            if (message.length > 2000) {
+                showError('消息长度不能超过2000字符');
+                return;
+            }
+
             // UI更新
             userInput.value = '';
-            sendBtn.disabled = true;
-            sendBtn.textContent = '处理中...';
+            charCount.textContent = '0/2000';
+            setInputEnabled(false);
             messageCount++;
             document.getElementById('sessionInfo').textContent = `会话: ${messageCount}`;
 
             // 添加用户消息
-            addMessage(message, 'user');
+            addMessage(message, 'user', [], { turn_count: turnCount + 1 });
+            updateTurnCount(turnCount + 1);
+
+            // 显示加载状态
+            showLoading();
+            updateSystemStatus('processing', '处理中...');
 
             // 显示思考过程
             showThinking(['🔍 正在分析意图...', '📦 分发任务到子Agent...', '⚙️ 执行工具调用...', '📋 整合结果...']);
@@ -595,73 +884,130 @@
             updateAgentStatus('orchestrate', 'active');
 
             const startTime = Date.now();
+            let lastError = null;
 
-            try {
-                const response = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        message: message,
-                        user_id: 'default',
-                        session_id: sessionId
-                    })
-                });
-
-                const data = await response.json();
-
-                // 解析响应
-                let displayText = data.response;
-                let toolInvocations = [];
-
+            // 重试循环
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
                 try {
-                    const parsed = JSON.parse(data.response);
-                    displayText = parsed.final_response || parsed.intent || JSON.stringify(parsed, null, 2);
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            message: message,
+                            user_id: 'default',
+                            session_id: sessionId
+                        })
+                    });
 
-                    // 提取工具调用信息
-                    if (parsed.priority_1_results) {
-                        Object.entries(parsed.priority_1_results).forEach(([agent, result]) => {
-                            if (result && typeof result === 'object') {
-                                toolInvocations.push({
-                                    tool: agent,
-                                    result: result.response || result.error || JSON.stringify(result).substring(0, 100)
-                                });
-                            }
-                        });
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
                     }
-                } catch (e) {
-                    // 保持原文本
+
+                    const data = await response.json();
+
+                    // 移除加载状态
+                    removeLoading();
+
+                    // 解析响应
+                    let displayText = data.response;
+                    let toolInvocations = [];
+                    let parsedData = data.response;
+                    let hasContext = false;
+                    let currentTurn = turnCount;
+
+                    try {
+                        parsedData = JSON.parse(data.response);
+                        displayText = parsedData.response || parsedData.error || JSON.stringify(parsedData, null, 2);
+                        hasContext = parsedData.has_context || false;
+
+                        // 更新轮数
+                        if (parsedData.turn_count) {
+                            updateTurnCount(parsedData.turn_count);
+                            currentTurn = parsedData.turn_count;
+                        }
+
+                        // 提取工具调用信息
+                        if (parsedData.priority_1_results) {
+                            Object.entries(parsedData.priority_1_results).forEach(([agent, result]) => {
+                                if (result && typeof result === 'object') {
+                                    toolInvocations.push({
+                                        tool: agent,
+                                        result: result.response || result.error || JSON.stringify(result).substring(0, 100)
+                                    });
+                                }
+                            });
+                        }
+
+                        // 检查错误
+                        if (parsedData.error) {
+                            displayText = `抱歉，${parsedData.error}`;
+                        }
+                    } catch (e) {
+                        // 保持原文本
+                    }
+
+                    // 添加助手消息
+                    addMessage(displayText.replace(/\n/g, '<br>'), 'assistant', toolInvocations, { has_context: hasContext, turn_count: currentTurn });
+
+                    // 完成状态
+                    updateAgentStatus('intent', 'done');
+                    updateAgentStatus('orchestrate', 'done');
+                    updateAgentStatus('execute', 'done');
+                    updateAgentStatus('planning', 'done');
+                    updateAgentStatus('memory', 'done');
+
+                    const elapsed = Date.now() - startTime;
+                    document.getElementById('responseTime').textContent = `响应时间: ${elapsed}ms`;
+
+                    updateSystemStatus('online', '系统正常');
+
+                    // 重置UI
+                    setInputEnabled(true);
+                    userInput.focus();
+
+                    // 3秒后清空思考过程
+                    setTimeout(() => {
+                        thinkingProcess.style.display = 'none';
+                        setTimeout(() => {
+                            ['intent', 'orchestrate', 'execute', 'planning', 'memory'].forEach(agent => {
+                                updateAgentStatus(agent, 'idle');
+                            });
+                        }, 2000);
+                    }, 3000);
+
+                    retryCount = 0;  // 重置重试计数
+                    return;  // 成功，直接返回
+
+                } catch (error) {
+                    lastError = error;
+                    console.error('请求失败:', error);
+
+                    if (attempt < maxRetries) {
+                        retryCount++;
+                        const delay = 1000 * attempt;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
                 }
-
-                // 添加助手消息
-                addMessage(displayText.replace(/\n/g, '<br>'), 'assistant', toolInvocations);
-
-                // 完成状态
-                updateAgentStatus('intent', 'done');
-                updateAgentStatus('orchestrate', 'done');
-                updateAgentStatus('execute', 'done');
-                updateAgentStatus('planning', 'done');
-                updateAgentStatus('memory', 'done');
-
-                document.getElementById('responseTime').textContent = `响应时间: ${Date.now() - startTime}ms`;
-
-            } catch (error) {
-                addMessage(`抱歉，服务出现问题: ${error.message}`, 'assistant');
             }
 
-            // 恢复按钮
-            sendBtn.disabled = false;
-            sendBtn.textContent = '发送';
+            // 所有重试都失败
+            removeLoading();
+            updateSystemStatus('error', '服务异常');
 
-            // 3秒后清空思考过程
-            setTimeout(() => {
-                thinkingProcess.style.display = 'none';
-                // 重置Agent状态
-                setTimeout(() => {
-                    ['intent', 'orchestrate', 'execute', 'planning', 'memory'].forEach(agent => {
-                        updateAgentStatus(agent, 'idle');
-                    });
-                }, 2000);
-            }, 3000);
+            let errorMessage = '抱歉，服务出现问题，请稍后重试';
+            if (lastError) {
+                if (lastError.message.includes('HTTP')) {
+                    errorMessage = '服务暂时不可用，请检查网络后重试';
+                }
+            }
+
+            addMessage(errorMessage, 'assistant');
+            showError(errorMessage);
+
+            // 恢复UI
+            setInputEnabled(true);
+            userInput.focus();
         }
 
         // 回车发送
@@ -674,9 +1020,22 @@
 
         // 快捷操作
         function quickAction(message) {
+            if (isProcessing) return;
             userInput.value = message;
             sendMessage();
         }
+
+        // 心跳检测（每30秒检查一次连接）
+        setInterval(async () => {
+            try {
+                const response = await fetch('/api/health', { method: 'GET' });
+                if (response.ok) {
+                    updateSystemStatus('online', '系统正常');
+                }
+            } catch (e) {
+                updateSystemStatus('error', '网络异常');
+            }
+        }, 30000);
 
         // 聚焦输入框
         userInput.focus();

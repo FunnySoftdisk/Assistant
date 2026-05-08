@@ -13,27 +13,37 @@ AGENTSCOPE_CONFIG = {
 }
 
 # ============================================================
-# LLM配置 - 支持Qwen3.5 (阿里云百炼) 或 OpenAI兼容API
+# LLM配置 - 支持多种后端
 # ============================================================
 
 # 方式1: 阿里云百炼/Qwen3.5 API
 #   - 获取地址: https://bailian.console.aliyun.com/
 #   - 模型名称: qwen-turbo, qwen-plus, qwen-max, qwen-long 等
 DASHSCOPE_CONFIG = {
-    # "api_key": 
-    
-    # 模型名称: qwen-turbo, qwen-plus, qwen-max, qwen-long 等
+    "api_key": os.getenv("DASHSCOPE_API_KEY", ""),
     "model_name": os.getenv("DASHSCOPE_MODEL", "qwen3-8b"),
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "temperature": 0.7,
     "max_tokens": 2000,
-    # Qwen3系列需要设置enable_thinking为false（非思考模式）
     "extra_params": {
         "enable_thinking": False
     }
 }
 
-# 方式2: OpenAI兼容API (如vllm本地部署)
+# 方式2: MiniMax API
+#   - 获取地址: https://www.minimaxi.com/
+#   - API Key格式: eyJxxx
+#   - 模型名称: MiniMax-Text-01, abab6.5s-chat 等
+MINIMAX_CONFIG = {
+    "api_key": os.getenv("MINIMAX_API_KEY", ""),
+    "model_name": os.getenv("MINIMAX_MODEL", "MiniMax-M2.7"),
+    "base_url": "https://api.minimax.chat/v1",
+    "temperature": 0.7,
+    "max_tokens": 2000,
+    "extra_params": {}
+}
+
+# 方式3: OpenAI兼容API (如vllm本地部署)
 #   - vllm部署后通常是 http://localhost:8000/v1
 OPENAI_COMPAT_CONFIG = {
     "api_key": os.getenv("OPENAI_API_KEY", "not-required"),
@@ -41,24 +51,27 @@ OPENAI_COMPAT_CONFIG = {
     "base_url": os.getenv("BASE_URL", "http://localhost:8000/v1"),
     "temperature": 0.7,
     "max_tokens": 2000,
+    "extra_params": {}
 }
 
 # ============================================================
 # 选择使用的LLM后端
 #   - "dashscope": 阿里云百炼 (Qwen3.5)
+#   - "minimax": MiniMax API
 #   - "openai": OpenAI兼容API (vllm本地部署)
-#   - "local": 本地vllm服务
 # ============================================================
-LLM_BACKEND = os.getenv("LLM_BACKEND", "dashscope")  # 默认使用Qwen3.5
+LLM_BACKEND = os.getenv("LLM_BACKEND", "dashscope")
 
 def get_llm_config():
     """获取当前配置的LLM配置"""
-    if LLM_BACKEND == "dashscope":
+    if LLM_BACKEND == "minimax":
+        return MINIMAX_CONFIG
+    elif LLM_BACKEND == "dashscope":
         return DASHSCOPE_CONFIG
     elif LLM_BACKEND == "openai":
         return OPENAI_COMPAT_CONFIG
     else:
-        return DASHSCOPE_CONFIG  # 默认
+        return DASHSCOPE_CONFIG
 
 # ============================================================
 # 调度配置

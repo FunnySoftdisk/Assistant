@@ -146,6 +146,8 @@ assistant/
 │   ├── summarization_agent.py     # 对话总结
 │   └── memory_agent.py            # 智能记忆
 ├── skills/                        # Skill插件
+│   ├── tool_skill/               # 工具Skill
+│   └── notification_skill/       # Windows通知Skill
 ├── memory/                        # 记忆系统
 │   ├── short_term.py              # Redis短期记忆
 │   └── long_term.py               # PostgreSQL长期记忆
@@ -153,6 +155,7 @@ assistant/
 ├── models/schemas.py              # 数据模型
 ├── core/                          # 配置 + LLM客户端
 ├── frontend/index.html            # 对话界面
+├── docs/                         # 技术文档
 ├── llm_local/                     # Qwen3-8B微调项目
 ├── main.py                        # 入口
 └── requirements.txt

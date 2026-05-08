@@ -3,12 +3,14 @@
 """
 import json
 import time
+import threading
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from collections import deque
 
 try:
     import redis
+    from redis import ConnectionPool
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
@@ -27,6 +29,62 @@ class ConversationState:
     last_active: float = field(default_factory=time.time)
 
 
+class RedisPool:
+    """
+    Redis连接池管理
+    线程安全，支持连接复用
+    """
+
+    def __init__(self, redis_config: dict = None, max_connections: int = 50):
+        self.redis_config = redis_config or {
+            "host": "localhost",
+            "port": 6379,
+            "db": 0,
+            "password": None,
+            "decode_responses": True
+        }
+        self.max_connections = max_connections
+        self._pool = None
+        self._lock = threading.Lock()
+
+        if REDIS_AVAILABLE:
+            self._init_pool()
+
+    def _init_pool(self):
+        """初始化连接池"""
+        try:
+            self._pool = ConnectionPool(
+                host=self.redis_config.get("host", "localhost"),
+                port=self.redis_config.get("port", 6379),
+                db=self.redis_config.get("db", 0),
+                password=self.redis_config.get("password"),
+                decode_responses=self.redis_config.get("decode_responses", True),
+                max_connections=self.max_connections
+            )
+            print("✓ Redis连接池初始化完成")
+        except Exception as e:
+            print(f"⚠️ Redis连接池初始化失败: {e}")
+            self._pool = None
+
+    def get_client(self):
+        """获取Redis客户端"""
+        if self._pool is None:
+            return None
+        try:
+            return redis.Redis(connection_pool=self._pool)
+        except Exception as e:
+            print(f"⚠️ 获取Redis客户端失败: {e}")
+            return None
+
+    def close(self):
+        """关闭连接池"""
+        if self._pool:
+            try:
+                self._pool.disconnect()
+            except Exception:
+                pass
+
+
 class ShortTermMemory:
     """
     短期记忆 - Redis存储
@@ -34,6 +92,12 @@ class ShortTermMemory:
     1. 对话状态（Session级）
     2. PreferenceAgent查询结果的缓存
     3. 最近对话上下文
+
+    特性:
+    - 连接池管理
+    - 连接失败时自动降级到内存存储
+    - 线程安全
+    - TTL自动过期
     """
 
     def __init__(
@@ -53,20 +117,24 @@ class ShortTermMemory:
             "password": None,
             "decode_responses": True
         }
-        self._redis = None
+
+        # 初始化连接池
+        self._redis_pool = None
+        if REDIS_AVAILABLE:
+            try:
+                self._redis_pool = RedisPool(self.redis_config)
+            except Exception as e:
+                print(f"⚠️ Redis连接池创建失败: {e}")
 
         # 本地后备存储（当Redis不可用时）
         self._local_store: Dict[str, Dict] = {}
+        self._local_lock = threading.Lock()  # 线程安全
 
-        # 尝试连接Redis
-        if REDIS_AVAILABLE:
-            try:
-                self._redis = redis.Redis(**self.redis_config)
-                self._redis.ping()
-                print("✓ Redis连接成功")
-            except Exception as e:
-                print(f"⚠️ Redis连接失败: {e}，使用本地存储")
-                self._redis = None
+    def _get_redis(self):
+        """获取Redis客户端"""
+        if self._redis_pool:
+            return self._redis_pool.get_client()
+        return None
 
     # ==================== 对话状态管理 ====================
 
@@ -84,24 +152,27 @@ class ShortTermMemory:
             "last_active": time.time()
         }
 
-        if self._redis:
+        redis_client = self._get_redis()
+        if redis_client:
             try:
-                self._redis.setex(key, self.ttl, json.dumps(data))
+                redis_client.setex(key, self.ttl, json.dumps(data))
                 return True
             except Exception as e:
                 print(f"⚠️ Redis存储失败: {e}")
 
         # 本地后备
-        self._local_store[key] = data
+        with self._local_lock:
+            self._local_store[key] = data
         return True
 
     def get_conversation_state(self, session_id: str) -> Optional[ConversationState]:
         """获取对话状态"""
         key = f"conv_state:{session_id}"
 
-        if self._redis:
+        redis_client = self._get_redis()
+        if redis_client:
             try:
-                data = self._redis.get(key)
+                data = redis_client.get(key)
                 if data:
                     state_data = json.loads(data)
                     return ConversationState(**state_data)
@@ -109,9 +180,10 @@ class ShortTermMemory:
                 print(f"⚠️ Redis读取失败: {e}")
 
         # 本地后备
-        data = self._local_store.get(key)
-        if data:
-            return ConversationState(**data)
+        with self._local_lock:
+            data = self._local_store.get(key)
+            if data:
+                return ConversationState(**data)
         return None
 
     def update_conversation_state(self, session_id: str, **kwargs) -> bool:
@@ -140,6 +212,10 @@ class ShortTermMemory:
         })
         state.last_active = time.time()
 
+        # 检查是否需要截断
+        if len(state.messages) > self.max_history * 2:  # 保留更多消息用于上下文
+            state.messages = state.messages[-self.max_history * 2:]
+
         return self.save_conversation_state(session_id, state)
 
     # ==================== 偏好缓存管理 ====================
@@ -153,23 +229,27 @@ class ShortTermMemory:
             "expires_at": time.time() + (ttl or self.ttl)
         }
 
-        if self._redis:
+        redis_client = self._get_redis()
+        if redis_client:
             try:
-                self._redis.setex(key, ttl or self.ttl, json.dumps(cache_data))
+                redis_client.setex(key, ttl or self.ttl, json.dumps(cache_data))
                 return True
             except Exception as e:
                 print(f"⚠️ 偏好缓存失败: {e}")
 
-        self._local_store[key] = cache_data
+        # 本地后备
+        with self._local_lock:
+            self._local_store[key] = cache_data
         return True
 
     def get_cached_preferences(self, user_id: str) -> Optional[Dict[str, Any]]:
         """获取缓存的偏好（用于PreferenceAgent快速查询）"""
         key = f"prefs_cache:{user_id}"
 
-        if self._redis:
+        redis_client = self._get_redis()
+        if redis_client:
             try:
-                data = self._redis.get(key)
+                data = redis_client.get(key)
                 if data:
                     cache_data = json.loads(data)
                     # 检查是否过期
@@ -177,28 +257,36 @@ class ShortTermMemory:
                         return cache_data.get("preferences")
                     else:
                         # 已过期，删除
-                        self._redis.delete(key)
+                        try:
+                            redis_client.delete(key)
+                        except Exception:
+                            pass
+                        return None
             except Exception as e:
                 print(f"⚠️ 偏好缓存读取失败: {e}")
 
         # 本地后备
-        cache_data = self._local_store.get(key)
-        if cache_data and cache_data.get("expires_at", 0) > time.time():
-            return cache_data.get("preferences")
+        with self._local_lock:
+            cache_data = self._local_store.get(key)
+            if cache_data and cache_data.get("expires_at", 0) > time.time():
+                return cache_data.get("preferences")
         return None
 
     def invalidate_preferences_cache(self, user_id: str) -> bool:
         """使偏好缓存失效（当长期记忆更新时调用）"""
         key = f"prefs_cache:{user_id}"
 
-        if self._redis:
+        redis_client = self._get_redis()
+        if redis_client:
             try:
-                self._redis.delete(key)
+                redis_client.delete(key)
             except Exception:
                 pass
 
-        if key in self._local_store:
-            del self._local_store[key]
+        # 本地后备
+        with self._local_lock:
+            if key in self._local_store:
+                del self._local_store[key]
         return True
 
     # ==================== Agent执行追踪 ====================
@@ -207,9 +295,10 @@ class ShortTermMemory:
         """记录Agent执行历史"""
         key = f"agent_exec:{session_id}"
 
-        if self._redis:
+        redis_client = self._get_redis()
+        if redis_client:
             try:
-                history = self._redis.lrange(key, 0, -1) or []
+                history = redis_client.lrange(key, 0, -1) or []
                 history.append(json.dumps({
                     "agent": agent_name,
                     "result": str(result)[:200],  # 截断
@@ -218,10 +307,10 @@ class ShortTermMemory:
                 # 只保留最近50条
                 if len(history) > 50:
                     history = history[-50:]
-                self._redis.delete(key)
+                redis_client.delete(key)
                 for item in history:
-                    self._redis.rpush(key, item)
-                self._redis.expire(key, self.ttl)
+                    redis_client.rpush(key, item)
+                redis_client.expire(key, self.ttl)
                 return True
             except Exception as e:
                 print(f"⚠️ Agent执行记录失败: {e}")
@@ -253,16 +342,19 @@ class ShortTermMemory:
             f"agent_exec:{session_id}"
         ]
 
-        if self._redis:
+        redis_client = self._get_redis()
+        if redis_client:
             try:
                 for key in keys_to_delete:
-                    self._redis.delete(key)
+                    redis_client.delete(key)
             except Exception:
                 pass
 
-        for key in keys_to_delete:
-            if key in self._local_store:
-                del self._local_store[key]
+        # 本地后备
+        with self._local_lock:
+            for key in keys_to_delete:
+                if key in self._local_store:
+                    del self._local_store[key]
         return True
 
     def cleanup_expired(self) -> int:
@@ -270,11 +362,21 @@ class ShortTermMemory:
         current_time = time.time()
         cleaned = 0
 
-        for key in list(self._local_store.keys()):
-            if key.startswith("prefs_cache:"):
-                data = self._local_store[key]
-                if data.get("expires_at", 0) < current_time:
-                    del self._local_store[key]
-                    cleaned += 1
+        with self._local_lock:
+            expired_keys = []
+            for key, data in self._local_store.items():
+                if key.startswith("prefs_cache:"):
+                    if data.get("expires_at", 0) < current_time:
+                        expired_keys.append(key)
+
+            for key in expired_keys:
+                del self._local_store[key]
+                cleaned += 1
 
         return cleaned
+
+    def close(self):
+        """关闭Redis连接池"""
+        if self._redis_pool:
+            self._redis_pool.close()
+            self._redis_pool = None

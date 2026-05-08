@@ -6,16 +6,23 @@ from agentscope.message import Msg
 from agentscope.memory import InMemoryMemory
 import json
 import re
+import asyncio
 from typing import Optional, Union, List, Dict
 
-from core.llm_client import llm_chat, LLMResponse
-from core.utils import safe_json_parse
+from core.llm_client import llm_chat, LLMResponse, LLMTimeoutError, LLMError
+from core.utils import safe_json_parse, validate_message
 
 
 class IntentionAgent(AgentBase):
     """
     意图识别Agent - 基于LLM语义理解识别用户意图
-    支持6大类意图识别 + 实体提取
+    支持7大类意图识别 + 实体提取
+
+    特性:
+    - LLM超时保护（30秒）
+    - 关键词回退机制（LLM失败时）
+    - 输入验证和长度控制
+    - 异常恢复
     """
 
     # 意图类型定义
@@ -50,7 +57,9 @@ class IntentionAgent(AgentBase):
 }
 
 confidence: 0-1之间的置信度
-entities: 提取的关键信息（地点、时间、人名等）"""
+entities: 提取的关键信息（地点、时间、人名等）
+
+注意：如果输入包含【对话历史】，请结合上下文理解用户意图。"""
 
     def __init__(self, name: str = "IntentionAgent", model_config: dict = None, **kwargs):
         super().__init__()
@@ -68,8 +77,32 @@ entities: 提取的关键信息（地点、时间、人名等）"""
 
         query = x.content if hasattr(x, 'content') else str(x)
 
+        # 验证输入
+        is_valid, error_msg = validate_message(query)
+        if not is_valid:
+            return Msg(
+                name=self.name,
+                content=json.dumps({
+                    "intent": "general_chat",
+                    "confidence": 0.0,
+                    "entities": {},
+                    "error": error_msg,
+                    "query": query
+                }, ensure_ascii=False),
+                role="assistant"
+            )
+
         # 调用LLM进行意图识别
-        result = await self._classify_intent(query)
+        try:
+            result = await self._classify_intent(query)
+        except asyncio.TimeoutError:
+            # LLM超时，使用关键词回退
+            result = self._classify_by_keywords(query)
+            result["fallback_reason"] = "LLM timeout"
+        except Exception as e:
+            # 发生异常，使用关键词回退
+            result = self._classify_by_keywords(query)
+            result["fallback_reason"] = f"Error: {str(e)}"
 
         return Msg(
             name=self.name,
@@ -85,7 +118,11 @@ entities: 提取的关键信息（地点、时间、人名等）"""
         ]
 
         try:
-            response = await llm_chat(messages)
+            # 添加超时保护
+            response = await asyncio.wait_for(
+                llm_chat(messages),
+                timeout=30.0
+            )
 
             # 解析JSON响应（安全解析）
             result = safe_json_parse(response)
@@ -109,17 +146,27 @@ entities: 提取的关键信息（地点、时间、人名等）"""
 
             return result
 
+        except asyncio.TimeoutError:
+            # 重试一次
+            try:
+                response = await asyncio.wait_for(
+                    llm_chat([{"role": "user", "content": f"识别意图: {query}"}]),
+                    timeout=30.0
+                )
+                result = safe_json_parse(response)
+                if result and result.get("intent") in self.INTENT_TYPES:
+                    return result
+            except:
+                pass
+
+            raise  # 让外层捕获并使用关键词回退
+
         except json.JSONDecodeError:
             # LLM返回非JSON，使用关键词回退
             return self._classify_by_keywords(query)
-        except Exception as e:
-            return {
-                "intent": "general_chat",
-                "confidence": 0.5,
-                "entities": self._extract_entities_fallback(query),
-                "query": query,
-                "error": str(e)
-            }
+        except LLMError as e:
+            # LLM调用错误，记录日志并使用关键词回退
+            return self._classify_by_keywords(query)
 
     def _classify_by_keywords(self, query: str) -> Dict:
         """关键词回退意图分类"""
@@ -145,7 +192,8 @@ entities: 提取的关键信息（地点、时间、人名等）"""
                 "intent": "general_chat",
                 "confidence": 0.5,
                 "entities": self._extract_entities_fallback(query),
-                "query": query
+                "query": query,
+                "fallback": True
             }
 
         best_intent = max(scores, key=scores.get)
@@ -155,7 +203,8 @@ entities: 提取的关键信息（地点、时间、人名等）"""
             "intent": best_intent,
             "confidence": confidence,
             "entities": self._extract_entities_fallback(query),
-            "query": query
+            "query": query,
+            "fallback": True
         }
 
     def _extract_entities_fallback(self, query: str) -> Dict:

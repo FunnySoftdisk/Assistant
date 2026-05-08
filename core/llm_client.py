@@ -23,7 +23,7 @@ class LLMResponse:
 class LLMClient:
     """
     统一LLM客户端
-    支持多种后端: dashscope(Qwen), openai, vllm
+    支持多种后端: dashscope(Qwen), minimax, openai, vllm
     """
 
     def __init__(
@@ -37,7 +37,7 @@ class LLMClient:
         extra_params: dict = None,
     ):
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "not-required")
-        self.model_name = model_name or os.getenv("MODEL_NAME", "qwen-turbo")
+        self.model_name = model_name or os.getenv("MODEL_NAME", "qwen3-8b")
         self.base_url = base_url or os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -151,6 +151,11 @@ class LLMError(Exception):
     pass
 
 
+class LLMTimeoutError(LLMError):
+    """LLM调用超时错误"""
+    pass
+
+
 # ============================================================
 # 全局LLM客户端实例
 # ============================================================
@@ -164,14 +169,13 @@ def get_llm_client() -> LLMClient:
         from core.config import get_llm_config, LLM_BACKEND
 
         config = get_llm_config()
-        extra_params = config.get("extra_params", {})
         _global_client = LLMClient(
             api_key=config["api_key"],
             model_name=config["model_name"],
             base_url=config["base_url"],
             temperature=config["temperature"],
             max_tokens=config["max_tokens"],
-            extra_params=extra_params,
+            extra_params=config.get("extra_params", {}),
         )
         print(f"✓ LLM客户端初始化完成 (backend: {LLM_BACKEND}, model: {config['model_name']})")
 

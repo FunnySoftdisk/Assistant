@@ -24,12 +24,19 @@ class PlanningAgent(AgentBase):
 
     SYSTEM_PROMPT = """你是一个专业的旅行规划助手，负责生成完整合理的行程安排。
 
-你会根据以下信息生成行程：
-1. 目的地和出行时间
-2. 用户偏好（酒店、交通、餐饮）
-3. 天气和交通状况（如果有）
+## 输入信息
 
-输出格式（JSON）：
+你会收到以下信息（通过 p1_results 传入）：
+1. **用户需求** (query): 用户描述的旅行需求
+2. **实体信息** (entities): 识别的地点、时间、人数等
+3. **P1结果** (p1_results):
+   - info_query_agent: 天气、交通等实时信息
+   - preference_agent: 用户偏好（酒店品牌、交通方式、餐饮等）
+   - execution_agent: 已执行的订票/预约信息
+
+## 输出格式
+
+生成JSON格式的行程规划：
 {
     "itinerary": {
         "day_1": {
@@ -59,7 +66,27 @@ class PlanningAgent(AgentBase):
     },
     "tips": ["注意事项1", "注意事项2", "注意事项3"],
     "packing_list": ["必要物品1", "必要物品2"]
-}"""
+}
+
+## 整合偏好
+
+根据 preference_agent 提供的偏好进行推荐：
+- **酒店偏好**：优先推荐用户喜欢的酒店品牌（如汉庭、如家、万豪等）
+- **交通偏好**：根据用户偏好安排出行方式（地铁/打车/公交）
+- **餐饮偏好**：根据用户喜好推荐餐厅类型（中餐/火锅/海鲜等）
+
+## 整合实时信息
+
+根据 info_query_agent 提供的信息：
+- **天气**：根据天气情况安排活动（如雨天安排室内活动）
+- **交通**：根据路况调整出行时间和路线
+
+## 生成原则
+
+1. **合理性**：行程安排符合逻辑，避免过于紧凑
+2. **个性化**：充分利用用户偏好信息
+3. **实用性**：提供有用的 tips 和 packing_list
+4. **完整性**：覆盖吃住行游购娱各方面"""
 
     def __init__(self, name: str = "PlanningAgent", model_config: dict = None, **kwargs):
         super().__init__()
@@ -114,12 +141,14 @@ class PlanningAgent(AgentBase):
                 if weather_info:
                     context_parts.append(f"天气信息: {weather_info}")
 
-            # 从PreferenceAgent获取用户偏好
-            if "preference_agent" in p1_results:
-                prefs = p1_results["preference_agent"].get("preferences", {})
-                if prefs:
-                    pref_str = ", ".join([f"{k}:{v}" for k, v in prefs.items() if isinstance(v, str)])
-                    context_parts.append(f"用户偏好: {pref_str}")
+            # 从MemoryAgent获取匹配到的用户偏好（新版架构）
+            if "memory_agent" in p1_results:
+                memory_result = p1_results["memory_agent"]
+                if isinstance(memory_result, dict):
+                    matched_prefs = memory_result.get("matched_preferences", [])
+                    if matched_prefs:
+                        pref_str = self._format_matched_preferences(matched_prefs)
+                        context_parts.append(f"用户偏好:\n{pref_str}")
 
         # 构建提示
         context = "\n".join(context_parts)
@@ -157,6 +186,31 @@ class PlanningAgent(AgentBase):
                 "error": str(e),
                 "response": "生成行程时出现问题"
             }
+
+    def _format_matched_preferences(self, matched_prefs: List[Dict]) -> str:
+        """格式化从MemoryAgent匹配到的偏好"""
+        if not matched_prefs:
+            return ""
+
+        formatted_parts = []
+        for pref in matched_prefs:
+            # 从metadata中提取description或value
+            value = pref.get("preference_value", "")
+            metadata = pref.get("metadata", {}) or {}
+
+            # 优先级：metadata.description > value > key
+            if metadata.get("description"):
+                desc = metadata["description"]
+            elif value:
+                desc = f"{pref.get('category', '')}:{value}"
+            else:
+                desc = f"{pref.get('category', '')}:{pref.get('preference_key', '')}"
+
+            # 添加置信度
+            conf = pref.get("confidence", 0.5)
+            formatted_parts.append(f"- {desc} (置信度: {conf:.0%})")
+
+        return "\n".join(formatted_parts) if formatted_parts else ""
 
     def _format_plan_response(self, plan: Dict) -> str:
         """格式化行程响应为友好文本"""

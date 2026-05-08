@@ -6,10 +6,11 @@ from agentscope.agent import AgentBase
 from agentscope.message import Msg
 from agentscope.memory import InMemoryMemory
 import json
+import asyncio
 from typing import Optional, Union, List, Dict
 
 from core.llm_client import llm_chat
-from core.utils import safe_json_parse
+from core.utils import safe_json_parse, validate_message
 from memory.short_term import ShortTermMemory
 from memory.long_term import LongTermMemory
 
@@ -22,35 +23,47 @@ class PreferenceAgent(AgentBase):
     2. 更新用户偏好（追加/覆盖）
     3. 缓存偏好查询结果
 
-    数据流：
-    - 短期记忆(Redis): 缓存查询结果，TTL 1小时
-    - 长期记忆(PostgreSQL): 持久化存储用户偏好
+    特性:
+    - 数据库连接失败时自动降级到文件存储
+    - 输入验证（长度限制、敏感字符）
+    - 查询结果缓存
     """
 
     SYSTEM_PROMPT = """你是一个偏好管理助手，负责理解和处理用户偏好。
 
-偏好类型包括：
-- hotel: 酒店品牌偏好（如汉庭、如家、万豪等）
-- airline: 航空公司偏好（如国航、东航、南航等）
-- seat: 座位偏好（如靠窗、靠过道）
-- room: 房型偏好（大床房、双床房等）
-- food: 餐饮偏好（中餐、西餐、小吃等）
-- transport: 交通偏好（地铁、公交、打车等）
-- budget: 预算等级（经济型、舒适型、高端型）
-- time: 时间偏好（早起、晚睡等）
+## 你的职责
 
-用户偏好表达模式：
-1. 追加模式：使用"还"、"也"、"另外"等词，表示追加新偏好
-2. 覆盖模式：使用"改成"、"变为"、"换"等词，表示替换旧偏好
+1. **理解用户偏好表达**：识别用户提到的酒店品牌、交通方式、餐饮喜好等
+2. **判断操作类型**：是查询现有偏好，还是添加/更新偏好
+3. **提取偏好结构**：将自然语言偏好转换为结构化数据
 
-输出JSON格式：
+## 偏好类型
+
+| 类别 | 例子 |
+|------|------|
+| hotel | 酒店品牌（汉庭、如家、万豪等） |
+| airline | 航空公司（国航、东航、南航等） |
+| seat | 座位偏好（靠窗、靠过道） |
+| room | 房型（大床房，双床房等） |
+| food | 餐饮（中餐、火锅、海鲜等） |
+| transport | 交通（地铁、打车、公交） |
+| budget | 预算（经济型、舒适型、高端型） |
+
+## 用户表达模式
+
+- **追加**："我喜欢汉庭"、"还喜欢万豪" → action: "append"
+- **覆盖**："换成如家"、"改成经济型" → action: "update"
+
+## 输出格式
+
+当需要更新偏好时：
 {
-    "action": "append" | "update" | "query",
+    "action": "append" | "update",
     "preferences": {
-        "category": {"key": "value"},
-        ...
+        "hotel": {"brand": "汉庭"},
+        "food": {"cuisine": "火锅"}
     },
-    "reasoning": "推理说明"
+    "reasoning": "用户表达了酒店和餐饮偏好"
 }"""
 
     def __init__(self, name: str = "PreferenceAgent", model_config: dict = None, **kwargs):
@@ -73,13 +86,39 @@ class PreferenceAgent(AgentBase):
 
         query = x.content if hasattr(x, 'content') else str(x)
 
+        # 验证输入
+        is_valid, error_msg = validate_message(query, max_length=1000)
+        if not is_valid:
+            return Msg(
+                name=self.name,
+                content=json.dumps({
+                    "action": "error",
+                    "error": error_msg,
+                    "response": f"输入验证失败: {error_msg}"
+                }, ensure_ascii=False),
+                role="assistant"
+            )
+
         # 判断是查询还是更新
         is_query = any(kw in query.lower() for kw in ["查询", "看看", "有什么", "list", "show", "我的偏好"])
 
-        if is_query:
-            result = await self._query_preference(query)
-        else:
-            result = await self._update_preference(query)
+        try:
+            if is_query:
+                result = await self._query_preference(query)
+            else:
+                result = await self._update_preference(query)
+        except asyncio.TimeoutError:
+            result = {
+                "action": "error",
+                "error": "LLM调用超时",
+                "response": "处理超时，请稍后重试"
+            }
+        except Exception as e:
+            result = {
+                "action": "error",
+                "error": str(e),
+                "response": f"处理失败: {str(e)[:50]}"
+            }
 
         return Msg(
             name=self.name,
@@ -97,45 +136,56 @@ class PreferenceAgent(AgentBase):
         # 提取查询类别
         category = self._extract_category(query)
 
-        # 从短期记忆获取缓存
-        user_id = "default"
-        cached = self.short_term.get_cached_preferences(user_id)
+        try:
+            # 从短期记忆获取缓存
+            user_id = "default"
+            cached = self.short_term.get_cached_preferences(user_id)
 
-        if cached and not category:
+            if cached and not category:
+                return {
+                    "action": "query",
+                    "preferences": cached,
+                    "source": "cache",
+                    "response": f"从缓存获取到 {len(cached)} 项偏好"
+                }
+
+            # 查询长期记忆
+            prefs = self.long_term.get_preferences(user_id, category)
+
+            if not prefs:
+                return {
+                    "action": "query",
+                    "preferences": {},
+                    "response": "您还没有设置偏好"
+                }
+
+            # 转换为dict格式
+            prefs_dict = {}
+            for p in prefs:
+                cat = p.get("category", "general")
+                if cat not in prefs_dict:
+                    prefs_dict[cat] = {}
+                prefs_dict[cat][p.get("preference_key", "value")] = p.get("preference_value")
+
+            # 缓存结果
+            try:
+                self.short_term.cache_preferences(user_id, prefs_dict)
+            except Exception:
+                pass
+
             return {
                 "action": "query",
-                "preferences": cached,
-                "source": "cache",
-                "response": f"从缓存获取到 {len(cached)} 项偏好"
+                "preferences": prefs_dict,
+                "source": "database",
+                "response": self._format_preferences_response(prefs_dict)
             }
-
-        # 查询长期记忆
-        prefs = self.long_term.get_preferences(user_id, category)
-
-        if not prefs:
+        except Exception as e:
             return {
                 "action": "query",
                 "preferences": {},
-                "response": "您还没有设置偏好"
+                "error": str(e),
+                "response": f"查询偏好时出现问题: {str(e)[:50]}"
             }
-
-        # 转换为dict格式
-        prefs_dict = {}
-        for p in prefs:
-            cat = p.get("category", "general")
-            if cat not in prefs_dict:
-                prefs_dict[cat] = {}
-            prefs_dict[cat][p.get("preference_key", "value")] = p.get("preference_value")
-
-        # 缓存结果
-        self.short_term.cache_preferences(user_id, prefs_dict)
-
-        return {
-            "action": "query",
-            "preferences": prefs_dict,
-            "source": "database",
-            "response": self._format_preferences_response(prefs_dict)
-        }
 
     async def _update_preference(self, query: str) -> Dict:
         """使用LLM理解并更新偏好"""
@@ -148,7 +198,7 @@ class PreferenceAgent(AgentBase):
         ]
 
         try:
-            response = await llm_chat(messages)
+            response = await asyncio.wait_for(llm_chat(messages), timeout=30.0)
             result = safe_json_parse(response)
 
             if result is None:
@@ -166,10 +216,16 @@ class PreferenceAgent(AgentBase):
             for category, prefs in preferences.items():
                 if isinstance(prefs, dict):
                     for key, value in prefs.items():
-                        self._save_preference(user_id, category, key, value, action)
+                        try:
+                            self._save_preference(user_id, category, key, value, action)
+                        except Exception as e:
+                            pass  # 单个保存失败不影响其他
 
             # 使缓存失效
-            self.short_term.invalidate_preferences_cache(user_id)
+            try:
+                self.short_term.invalidate_preferences_cache(user_id)
+            except Exception:
+                pass
 
             return {
                 "action": "update",
@@ -177,6 +233,12 @@ class PreferenceAgent(AgentBase):
                 "response": f"已更新您的偏好设置"
             }
 
+        except asyncio.TimeoutError:
+            return {
+                "action": "update",
+                "error": "LLM调用超时",
+                "response": "更新偏好超时，请稍后重试"
+            }
         except Exception as e:
             return {
                 "action": "update",
@@ -188,15 +250,18 @@ class PreferenceAgent(AgentBase):
         """保存偏好到长期记忆"""
         from memory.long_term import UserPreference
 
-        preference = UserPreference(
-            user_id=user_id,
-            category=category,
-            key=key,
-            value=value,
-            confidence=0.9,
-            source="conversation"
-        )
-        return self.long_term.save_preference(preference)
+        try:
+            preference = UserPreference(
+                user_id=user_id,
+                category=category,
+                key=key,
+                value=value,
+                confidence=0.9,
+                source="conversation"
+            )
+            return self.long_term.save_preference(preference)
+        except Exception as e:
+            return False
 
     def _extract_category(self, query: str) -> str:
         """从查询中提取偏好类别"""

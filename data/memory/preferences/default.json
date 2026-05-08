@@ -1,0 +1,14 @@
+{
+  "time_key": {
+    "value": "15:00",
+    "confidence": 0.9,
+    "source": "conversation",
+    "updated_at": "2026-05-08T17:26:25.307867"
+  },
+  "event_key": {
+    "value": "周会",
+    "confidence": 0.9,
+    "source": "conversation",
+    "updated_at": "2026-05-08T17:26:25.308092"
+  }
+}
