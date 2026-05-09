@@ -184,7 +184,7 @@ class PlanningAgent(AgentBase):
             return {
                 "action": "planning",
                 "error": str(e),
-                "response": "生成行程时出现问题"
+                "response": f"生成行程时出现问题: {str(e)[:50]}"
             }
 
     def _format_matched_preferences(self, matched_prefs: List[Dict]) -> str:

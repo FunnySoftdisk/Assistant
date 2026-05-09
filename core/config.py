@@ -60,7 +60,8 @@ OPENAI_COMPAT_CONFIG = {
 #   - "minimax": MiniMax API
 #   - "openai": OpenAI兼容API (vllm本地部署)
 # ============================================================
-LLM_BACKEND = os.getenv("LLM_BACKEND", "dashscope")
+# LLM_BACKEND = os.getenv("LLM_BACKEND", "dashscope")
+LLM_BACKEND = os.getenv("LLM_BACKEND", "minimax")
 
 def get_llm_config():
     """获取当前配置的LLM配置"""

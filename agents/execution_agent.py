@@ -16,10 +16,14 @@ class ExecutionAgent(AgentBase):
     """
     外部执行Agent - 执行外部操作
     职责：
-    1. 订票操作 - 机票、酒店、火车票等（模拟，实际需接入API）
+    1. 订票操作 - 机票、酒店、火车票等
     2. 设置闹钟 - 提醒用户重要事项
-    3. 发送通知 - 邮件、短信等（模拟）
+    3. 发送通知 - 邮件、短信等
     4. 日程提醒 - 创建日历事件
+
+    注意：
+    - 机票/酒店API未接入时，返回明确错误而非模拟成功
+    - 闹钟等系统功能可真实执行
 
     特性:
     - 操作超时保护（15秒）
@@ -75,7 +79,7 @@ class ExecutionAgent(AgentBase):
 
 1. **超时处理**：如果操作执行时间过长（>15秒），返回超时提示
 2. **参数不全**：不尝试执行参数不全的操作，而是询问用户补充
-3. **模拟操作**：当前机票/酒店API未接入时，明确告知用户是模拟操作
+3. **API未接入**：机票/酒店API未接入时，明确返回错误告知用户
 4. **操作历史**：记录每次操作，便于后续查询和追溯"""
 
     def __init__(self, name: str = "ExecutionAgent", model_config: dict = None, **kwargs):
@@ -292,48 +296,24 @@ class ExecutionAgent(AgentBase):
         return await self._general_execute(task)
 
     async def _book_flight(self, params: Dict) -> Dict:
-        """模拟订机票"""
-        try:
-            # TODO: 接入真实机票API（如飞猪、携程、去哪儿）
-            destination = params.get("destination", "未知")
-            date = params.get("date", "待定")
-
-            return {
-                "action": "book_flight",
-                "status": "simulated",
-                "destination": destination,
-                "date": date,
-                "response": f"模拟订票成功：{date}飞往{destination}的机票已下单（实际需接入机票API）",
-                "note": "此为模拟操作，实际订票需接入飞猪/携程等API"
-            }
-        except Exception as e:
-            return {
-                "action": "book_flight",
-                "status": "error",
-                "error": str(e),
-                "response": "订机票失败"
-            }
+        """订机票 - API未接入时返回错误"""
+        # TODO: 接入真实机票API（如飞猪、携程、去哪儿）
+        return {
+            "action": "book_flight",
+            "status": "error",
+            "error": "机票API未接入",
+            "response": "抱歉，机票预订功能暂未开放，请稍后再试或联系客服"
+        }
 
     async def _book_hotel(self, params: Dict) -> Dict:
-        """模拟订酒店"""
-        try:
-            # TODO: 接入真实酒店API
-            destination = params.get("destination", "未知")
-
-            return {
-                "action": "book_hotel",
-                "status": "simulated",
-                "destination": destination,
-                "response": f"模拟订房成功：在{destination}预订了酒店（实际需接入酒店API）",
-                "note": "此为模拟操作，实际订房需接入携程/美团等API"
-            }
-        except Exception as e:
-            return {
-                "action": "book_hotel",
-                "status": "error",
-                "error": str(e),
-                "response": "订酒店失败"
-            }
+        """订酒店 - API未接入时返回错误"""
+        # TODO: 接入真实酒店API
+        return {
+            "action": "book_hotel",
+            "status": "error",
+            "error": "酒店API未接入",
+            "response": "抱歉，酒店预订功能暂未开放，请稍后再试或联系客服"
+        }
 
     async def _set_alarm(self, params: Dict) -> Dict:
         """设置闹钟/提醒"""

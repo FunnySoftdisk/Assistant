@@ -304,6 +304,15 @@ async def chat(request: ChatRequest, http_request: Request) -> ChatResponse:
         except json.JSONDecodeError:
             intent_data = {"intent": "general_chat", "entities": {}}
 
+        # 如果意图识别失败，返回错误给用户
+        if intent_data.get("error"):
+            return ChatResponse(
+                response=json.dumps({"error": intent_data["error"]}, ensure_ascii=False),
+                session_id=session_id,
+                tasks_executed=["intention_agent"],
+                memory_updated=False
+            )
+
         # 添加上下文信息到 entities
         if conversation_context:
             intent_data["has_context"] = True
@@ -457,22 +466,34 @@ async def get_context(session_id: str, max_turns: int = 5):
 
 @router.get("/skills")
 async def list_skills():
-    """列出所有可用Skill"""
-    global _skill_registry
-    if not _skill_registry:
-        _skill_registry = get_skill_registry("skills")
+    """列出所有可用Skill（从GenericSkillLoader获取）"""
+    from skills.generic_skill import get_generic_skill_loader
+
+    loader = get_generic_skill_loader()
+    all_skills = loader.list_skills()
+
+    skill_list = []
+    for name, skill in all_skills.items():
+        tools_with_path = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "has_script": bool(t.script_path)
+            }
+            for t in skill.tools
+        ]
+        skill_list.append({
+            "name": name,
+            "version": skill.version,
+            "description": skill.description,
+            "tools": tools_with_path,
+            "trigger_keywords": skill.trigger_keywords[:10]  # 限制数量
+        })
 
     return {
-        "skills": [
-            {
-                "name": s.name,
-                "version": s.version,
-                "description": s.description,
-                "agent_type": s.agent_type,
-                "tools": s.tools
-            }
-            for s in _skill_registry.list_skills().values()
-        ]
+        "skills": skill_list,
+        "total": len(skill_list),
+        "skills_with_scripts": len([s for s in skill_list if any(t["has_script"] for t in s["tools"])])
     }
 
 

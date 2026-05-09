@@ -6,6 +6,7 @@ from agentscope.message import Msg
 from agentscope.memory import InMemoryMemory
 import json
 import asyncio
+import re
 from typing import Optional, Union, List, Dict
 
 from core.llm_client import llm_chat
@@ -25,69 +26,75 @@ class SummarizationAgent(AgentBase):
     - LLM调用超时保护（30秒）
     - JSON解析失败时返回降级响应
     - 重点关注执行结果的反馈
+    - 动态感知系统Skill能力
     """
-
-    SYSTEM_PROMPT = """你是一个对话总结助手，负责整合对话结果并告诉用户完整情况。
-
-## 你的职责
-
-1. **整合所有信息**：将P1/P2/P3各阶段的结果整合成完整回复
-2. **重点反馈执行结果**：用户最关心的是外部操作是否成功
-3. **清晰展示行程**：告诉用户生成的行程安排
-4. **提醒后续操作**：如需订票确认、出发提醒等
-
-## 需要整合的信息
-
-### P1 结果（信息收集）
-- 用户偏好匹配结果
-- 天气、交通等信息
-
-### P2 结果（规划生成）
-- 行程规划详情
-- 预算估算
-- 注意事项
-
-### P3 结果（执行操作）
-- 订票结果（成功/失败/模拟）
-- 闹钟设置结果
-- 通知发送结果
-
-## 输出格式
-
-JSON格式：
-{
-    "main_intent": "主要意图",
-    "planning_summary": "行程规划概要",
-    "execution_summary": "执行操作结果（如有）",
-    "important_reminders": ["重要提醒1", "重要提醒2"],
-    "pending_actions": ["待确认事项"],
-    "next_steps": "下一步建议",
-    "response": "给用户的完整回复文本"
-}
-
-## 反馈原则
-
-1. **执行结果放首位**：先告诉用户订票/闹钟是否成功
-2. **行程规划要清晰**：用简洁语言描述日程安排
-3. **提醒要实用**：如出发时间、准备物品等
-4. **诚实告知模拟**：如果是模拟操作，明确告知用户这是测试
-
-## 示例
-
-用户: "帮我规划去上海3天的行程，订机票，设闹钟"
-回复:
-"已为您完成以下操作：
-1. 行程规划：上海3天商务行（第一天外滩、第二天陆家嘴、第三天迪士尼）
-2. 机票预订：已下单，明天9:00东航MU5136（模拟操作）
-3. 闹钟提醒：已设置出发闹钟7:30（模拟操作）
-注意事项：请提前2小时到机场。"
-"""
 
     def __init__(self, name: str = "SummarizationAgent", model_config: dict = None, **kwargs):
         super().__init__()
         self.name = name
         self.model_config = model_config or {}
         self.memory = InMemoryMemory()
+
+        # 加载Skill加载器获取真实能力列表
+        from skills.generic_skill import get_generic_skill_loader
+        self.skill_loader = get_generic_skill_loader()
+
+        # 动态更新SYSTEM_PROMPT，加入真实Skills
+        self._update_skill_prompt()
+
+    def _update_skill_prompt(self):
+        """动态更新Skill提示"""
+        all_skills = self.skill_loader.list_skills()
+        total = len(all_skills)
+        with_scripts = sum(1 for s in all_skills.values() if any(t.script_path for t in s.tools))
+
+        skill_lines = []
+        for name, skill in all_skills.items():
+            if skill.tools and any(t.script_path for t in skill.tools):
+                tool_names = [t.name for t in skill.tools if t.script_path]
+                if tool_names:
+                    skill_lines.append(f"- **{name}**: {', '.join(tool_names)}")
+
+        skills_info = "\n".join(skill_lines) if skill_lines else "无"
+
+        prompt_parts = [
+            "你是一个对话总结助手，负责整合对话结果并告诉用户完整情况。",
+            "",
+            "## 你的职责",
+            "1. 整合所有信息：将P1/P2/P3各阶段的结果整合成完整回复",
+            "2. 重点反馈执行结果：用户最关心的是外部操作是否成功",
+            "3. 清晰展示行程：告诉用户生成的行程安排",
+            "4. 提醒后续操作：如需订票确认、出发提醒等",
+            "5. 介绍系统能力：如用户问及系统能力，如实介绍已集成的Skills",
+            "",
+            "## 系统Skill能力",
+            f"系统目前集成了 **{total}** 个Skills，其中 **{with_scripts}** 个有可执行工具：",
+            skills_info,
+            "",
+            "## 需要整合的信息",
+            "### P1 结果（信息收集）",
+            "- 用户偏好匹配结果",
+            "- 天气、交通等信息",
+            "",
+            "### P2 结果（规划生成）",
+            "- 行程规划详情",
+            "- 预算估算",
+            "- 注意事项",
+            "",
+            "### P3 结果（执行操作）",
+            "- 订票结果（成功/失败/模拟）",
+            "- 闹钟设置结果",
+            "- 通知发送结果",
+            "",
+            "## 反馈原则",
+            "1. 执行结果放首位：先告诉用户订票/闹钟是否成功",
+            "2. 行程规划要清晰：用简洁语言描述日程安排",
+            "3. 提醒要实用：如出发时间、准备物品等",
+            "4. 诚实告知模拟：如果是模拟操作，明确告知用户这是测试",
+            "5. 如实介绍能力：当用户问及系统能力时，介绍已集成的真实Skills",
+        ]
+
+        self.SYSTEM_PROMPT = "\n".join(prompt_parts)
 
     async def reply(self, x: Optional[Union[Msg, List[Msg]]] = None) -> Msg:
         """处理总结请求"""
@@ -108,7 +115,7 @@ JSON格式：
             summary = {
                 "action": "summarize",
                 "error": "LLM超时",
-                "response": f"总结生成超时，请稍后重试"
+                "response": "总结生成超时，请稍后重试"
             }
         except Exception as e:
             summary = {
@@ -177,13 +184,13 @@ JSON格式：
                     response = result.get("response", "")
 
                     if status == "success":
-                        execution_results.append(f"✓ {action}成功: {response}")
+                        execution_results.append(f"[OK] {action}成功: {response}")
                     elif status == "simulated":
-                        execution_results.append(f"~ {action}(模拟): {response}")
+                        execution_results.append(f"[SIM] {action}(模拟): {response}")
                     elif status == "timeout":
-                        execution_results.append(f"✗ {action}超时")
+                        execution_results.append(f"[TIMEOUT] {action}超时")
                     elif status == "error":
-                        execution_results.append(f"✗ {action}失败: {result.get('error', '')}")
+                        execution_results.append(f"[ERROR] {action}失败: {result.get('error', '')}")
 
             if execution_results:
                 context_parts.extend(execution_results)
@@ -204,10 +211,14 @@ JSON格式：
             summary = safe_json_parse(response)
 
             if summary is None:
+                # LLM返回的不是JSON格式，可能是自然语言回复
+                # 直接使用LLM的响应作为回复（移除LLM思考标签）
+                clean_response = response
+                if '<think>' in clean_response:
+                    clean_response = re.sub(r'<think>.*?', '', clean_response, flags=re.DOTALL)
                 return {
                     "action": "summarize",
-                    "error": "JSON解析失败",
-                    "response": self._fallback_response(query, p1_results, p2_results, p3_results)
+                    "response": clean_response.strip() if clean_response.strip() else "已完成处理"
                 }
 
             return {
@@ -266,5 +277,4 @@ JSON格式：
         if parts:
             return " | ".join(parts)
 
-        # 完全没有有效结果时，返回友好提示而非原问题
         return "抱歉，暂时无法处理您的请求，请稍后重试"

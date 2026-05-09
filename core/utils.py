@@ -14,6 +14,7 @@ def safe_json_parse(text: str) -> Optional[dict]:
     1. Markdown代码块包裹
     2. 首行非JSON内容
     3. 截断的JSON
+    4. LLM思考标签（、<think>）
     """
     if not text:
         return None
@@ -30,6 +31,8 @@ def safe_json_parse(text: str) -> Optional[dict]:
     if text.endswith("```"):
         text = text[:-3]
 
+    # 移除LLM思考标签
+    text = re.sub(r'<think>.*?', '', text, flags=re.DOTALL)
     text = text.strip()
 
     # 尝试直接解析

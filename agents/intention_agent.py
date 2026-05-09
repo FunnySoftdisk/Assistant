@@ -23,6 +23,7 @@ class IntentionAgent(AgentBase):
     - 关键词回退机制（LLM失败时）
     - 输入验证和长度控制
     - 异常恢复
+    - 动态感知系统Skill能力
     """
 
     # 意图类型定义
@@ -36,10 +37,38 @@ class IntentionAgent(AgentBase):
         "general_chat"       # 一般对话
     ]
 
-    # 系统提示词
-    SYSTEM_PROMPT = """你是一个智能助手，负责识别用户的意图。
+    def __init__(self, name: str = "IntentionAgent", model_config: dict = None, **kwargs):
+        super().__init__()
+        self.name = name
+        self.model_config = model_config or {}
+        self.memory = InMemoryMemory()
 
-支持的意图类型：
+        # 加载Skill加载器获取真实能力列表
+        from skills.generic_skill import get_generic_skill_loader
+        self.skill_loader = get_generic_skill_loader()
+
+        # 动态更新SYSTEM_PROMPT
+        self._update_system_prompt()
+
+    def _update_system_prompt(self):
+        """动态构建系统提示，包含当前可用的真实Skills"""
+        all_skills = self.skill_loader.list_skills()
+        total = len(all_skills)
+        with_scripts = sum(1 for s in all_skills.values() if any(t.script_path for t in s.tools))
+
+        # 收集有可执行工具的Skills
+        skill_lines = []
+        for name, skill in all_skills.items():
+            if skill.tools and any(t.script_path for t in skill.tools):
+                tool_names = [t.name for t in skill.tools if t.script_path]
+                if tool_names:
+                    skill_lines.append(f"- {name}: {', '.join(tool_names)}")
+
+        skills_info = "\n".join(skill_lines) if skill_lines else "无"
+
+        self.SYSTEM_PROMPT = f"""你是一个智能助手，负责识别用户的意图。
+
+## 支持的意图类型
 - travel_planning: 规划旅行行程，如"帮我规划去上海的行程"
 - memory_query: 查询历史记忆，如"我之前去过哪里"
 - preference_manage: 管理用户偏好，如"我喜欢汉庭酒店"
@@ -48,24 +77,27 @@ class IntentionAgent(AgentBase):
 - execution: 执行操作，如"帮我做xxx"
 - general_chat: 一般对话，如"你好"、"谢谢"
 
+## 系统可用Skills（共{total}个，其中{with_scripts}个有可执行工具）
+{skills_info}
+
+## 意图识别指南
+
+当用户询问系统能力时（如"你有什么用"、"支持什么功能"），应识别为 **general_chat**。
+
+当用户进行信息查询时，根据查询内容考虑可用的Skills：
+
 请分析用户输入，返回JSON格式的意图识别结果：
-{
+{{
     "intent": "意图类型",
     "confidence": 0.95,
-    "entities": {"locations": ["上海"], "date": "3月5日"},
+    "entities": {{"locations": ["上海"], "date": "3月5日"}},
     "reasoning": "简单推理说明"
-}
+}}
 
 confidence: 0-1之间的置信度
 entities: 提取的关键信息（地点、时间、人名等）
 
 注意：如果输入包含【对话历史】，请结合上下文理解用户意图。"""
-
-    def __init__(self, name: str = "IntentionAgent", model_config: dict = None, **kwargs):
-        super().__init__()
-        self.name = name
-        self.model_config = model_config or {}
-        self.memory = InMemoryMemory()
 
     async def reply(self, x: Optional[Union[Msg, List[Msg]]] = None) -> Msg:
         """识别用户意图 - 使用LLM"""
@@ -96,13 +128,31 @@ entities: 提取的关键信息（地点、时间、人名等）
         try:
             result = await self._classify_intent(query)
         except asyncio.TimeoutError:
-            # LLM超时，使用关键词回退
-            result = self._classify_by_keywords(query)
-            result["fallback_reason"] = "LLM timeout"
+            # LLM超时
+            return Msg(
+                name=self.name,
+                content=json.dumps({
+                    "intent": "general_chat",
+                    "confidence": 0.0,
+                    "entities": {},
+                    "error": "LLM调用超时，请稍后重试",
+                    "query": query
+                }, ensure_ascii=False),
+                role="assistant"
+            )
         except Exception as e:
-            # 发生异常，使用关键词回退
-            result = self._classify_by_keywords(query)
-            result["fallback_reason"] = f"Error: {str(e)}"
+            # LLM调用失败，直接返回错误
+            return Msg(
+                name=self.name,
+                content=json.dumps({
+                    "intent": "general_chat",
+                    "confidence": 0.0,
+                    "entities": {},
+                    "error": f"LLM调用失败: {str(e)[:100]}",
+                    "query": query
+                }, ensure_ascii=False),
+                role="assistant"
+            )
 
         return Msg(
             name=self.name,
@@ -117,56 +167,33 @@ entities: 提取的关键信息（地点、时间、人名等）
             {"role": "user", "content": query}
         ]
 
-        try:
-            # 添加超时保护
-            response = await asyncio.wait_for(
-                llm_chat(messages),
-                timeout=30.0
-            )
+        # 添加超时保护
+        response = await asyncio.wait_for(
+            llm_chat(messages),
+            timeout=30.0
+        )
 
-            # 解析JSON响应（安全解析）
-            result = safe_json_parse(response)
+        # 解析JSON响应（安全解析）
+        result = safe_json_parse(response)
 
-            if result is None:
-                # 解析失败，使用关键词回退
-                return self._classify_by_keywords(query)
+        if result is None:
+            # 解析失败，直接抛出异常让外层处理
+            raise LLMError("LLM返回格式无法解析为JSON")
 
-            # 验证intent有效性
-            if result.get("intent") not in self.INTENT_TYPES:
-                result["intent"] = "general_chat"
-                result["confidence"] = 0.5
+        # 验证intent有效性
+        if result.get("intent") not in self.INTENT_TYPES:
+            result["intent"] = "general_chat"
+            result["confidence"] = 0.5
 
-            # 确保entities存在
-            if "entities" not in result:
-                result["entities"] = {}
+        # 确保entities存在
+        if "entities" not in result:
+            result["entities"] = {}
 
-            # 补充实体提取
-            result["entities"].update(self._extract_entities_fallback(query))
-            result["query"] = query
+        # 补充实体提取
+        result["entities"].update(self._extract_entities_fallback(query))
+        result["query"] = query
 
-            return result
-
-        except asyncio.TimeoutError:
-            # 重试一次
-            try:
-                response = await asyncio.wait_for(
-                    llm_chat([{"role": "user", "content": f"识别意图: {query}"}]),
-                    timeout=30.0
-                )
-                result = safe_json_parse(response)
-                if result and result.get("intent") in self.INTENT_TYPES:
-                    return result
-            except:
-                pass
-
-            raise  # 让外层捕获并使用关键词回退
-
-        except json.JSONDecodeError:
-            # LLM返回非JSON，使用关键词回退
-            return self._classify_by_keywords(query)
-        except LLMError as e:
-            # LLM调用错误，记录日志并使用关键词回退
-            return self._classify_by_keywords(query)
+        return result
 
     def _classify_by_keywords(self, query: str) -> Dict:
         """关键词回退意图分类"""

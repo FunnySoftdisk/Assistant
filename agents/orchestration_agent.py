@@ -9,6 +9,7 @@ import asyncio
 from typing import Optional, Union, List, Dict, Any
 
 from core.llm_client import llm_chat
+from skills.generic_skill import get_generic_skill_loader
 
 
 class OrchestrationAgent(AgentBase):
@@ -48,6 +49,10 @@ class OrchestrationAgent(AgentBase):
         self.model_config = model_config or {}
         self.memory = InMemoryMemory()
         self.agents = agents or {}
+
+        # 加载通用Skills
+        self.skill_loader = get_generic_skill_loader()
+        print(f"✓ 已加载 {len(self.skill_loader.list_skills())} 个Skills")
 
         # 意图到Agent的映射
         # P1: 并行获取信息和偏好
@@ -92,7 +97,7 @@ class OrchestrationAgent(AgentBase):
                 "summarize": ["summarization_agent"]
             },
             "general_chat": {
-                "p1": ["memory_agent"],
+                "p1": [],
                 "p2": [],
                 "p3": [],
                 "summarize": ["summarization_agent"]

@@ -1,6 +1,6 @@
 """
 信息查询Agent - 外部信息查询
-负责天气、时间、交通等实时信息查询
+动态从Skill目录发现并调用工具，Skill不可用时降级到DuckDuckGo搜索
 """
 from agentscope.agent import AgentBase
 from agentscope.message import Msg
@@ -10,31 +10,65 @@ import asyncio
 from typing import Optional, Union, List, Dict
 
 from core.llm_client import llm_chat
+from skills.generic_skill import get_generic_skill_loader
 
 
 class InfoQueryAgent(AgentBase):
     """
-    信息查询Agent - 外部信息查询
+    信息查询Agent - 动态Skill调度
     职责：
-    1. 天气查询 - 调用天气API
-    2. 时间查询 - 获取当前日期时间
-    3. 交通查询 - 公交、地铁、路况等
-    4. 通用搜索 - DuckDuckGo联网搜索
+    1. 动态发现可用的Skills和Tools
+    2. 根据查询内容匹配最佳Skill
+    3. Skill不可用时降级到DuckDuckGo搜索
+    4. 内置时间/日期等基础查询
 
-    特性:
-    - 搜索结果缓存
-    - 网络超时保护（10秒）
-    - 搜索库缺失时的友好提示
-    - 单个查询失败不影响其他
+    特性：
+    - 单个Skill失败不影响其他
+    - Skill无脚本时自动降级搜索
+    - 30秒超时保护
     """
 
-    SYSTEM_PROMPT = """你是一个实时信息查询助手，负责回答天气、时间、交通、搜索等问题。
+    def __init__(self, name: str = "InfoQueryAgent", model_config: dict = None, **kwargs):
+        super().__init__()
+        self.name = name
+        self.model_config = model_config or {}
+        self.memory = InMemoryMemory()
+
+        # 加载Skill加载器
+        self.skill_loader = get_generic_skill_loader()
+        print(f"✓ InfoQueryAgent 已加载 {len(self.skill_loader.list_skills())} 个Skills")
+
+        # 内置工具（不依赖外部Skill）
+        self.builtin_tools = {
+            "time": self._query_time,
+            "date": self._query_date,
+        }
+
+        # 动态生成SYSTEM_PROMPT，包含当前可用的真实Skills
+        self.SYSTEM_PROMPT = self._build_system_prompt()
+
+    def _build_system_prompt(self) -> str:
+        """动态构建系统提示，包含当前可用的真实Skills"""
+        all_skills = self.skill_loader.list_skills()
+
+        # 收集所有有可执行脚本的tools
+        skill_lines = []
+        for name, skill in all_skills.items():
+            if skill.tools:
+                tool_names = [t.name for t in skill.tools if t.script_path]
+                if tool_names:
+                    tool_str = ", ".join(tool_names)
+                    skill_lines.append(f"| {name} | {skill.description[:50]} | {tool_str} |")
+
+        skills_table = "\n".join(skill_lines) if skill_lines else "| 无 | - | - |"
+
+        return f"""你是一个实时信息查询助手，负责回答天气、时间、交通、搜索等问题。
 
 ## 你的职责
 
 1. **理解查询意图**：用户是想查天气、查时间、查交通还是搜索信息
-2. **提取查询参数**：地点、时间、关键词等
-3. **执行查询**：调用相应工具获取信息
+2. **匹配Skill**：优先使用已集成的Skill工具
+3. **降级搜索**：Skill不可用时使用DuckDuckGo搜索
 4. **格式化回答**：将查询结果以友好方式返回
 
 ## 查询类型
@@ -45,46 +79,34 @@ class InfoQueryAgent(AgentBase):
 | 时间 | "现在几点"、"时间" | 当前时间 HH:MM:SS |
 | 日期 | "今天几号"、"日期" | 当前日期、工作日 |
 | 交通 | "上海路况"、"堵车吗" | 拥堵程度、道路状况 |
-| 搜索 | "搜索xxx"、"查一下xxx" | 相关结果摘要 |
+| 搜索 | "餐厅评分"、"大众点评"等 | 相关结果摘要 |
 
-## 工具调用
+## 已集成的Skills（真实可用）
 
-你会通过以下内置工具获取信息：
-- weather: 查询指定地点的天气
-- time: 获取当前时间
-- date: 获取当前日期
-- traffic: 查询交通状况
-- search: 执行网络搜索
+系统已集成以下Skills（共 {len(all_skills)} 个，其中 {sum(1 for s in all_skills.values() if any(t.script_path for t in s.tools))} 个有可执行工具）：
+
+| Skill名称 | 功能说明 | 可用工具 |
+|---------|----------|----------|
+{skills_table}
+
+## 工具调用流程
+
+1. 先尝试使用匹配的Skill的工具
+2. 如果Skill无脚本或调用失败，降级到DuckDuckGo搜索
+3. DuckDuckGo搜索是通用的后备方案
 
 ## 回答原则
 
 1. **准确**：提供准确的信息，不要编造
 2. **简洁**：用简洁语言表达，避免冗长
-3. **有用**：如果信息不完整，说明情况并给出建议
-4. **友好**：使用友好的语气
+3. **诚实**：如果搜索也查不到，说明情况
+4. **说明来源**：告诉用户数据来自哪个工具/Skill
 
 ## 特殊情况
 
 - 如果无法获取天气信息，说明原因并建议用户手动查询
 - 如果搜索结果为空，诚实告知并建议其他搜索词
 - 如果网络超时，说明暂时无法查询并建议稍后重试"""
-
-    def __init__(self, name: str = "InfoQueryAgent", model_config: dict = None, **kwargs):
-        super().__init__()
-        self.name = name
-        self.model_config = model_config or {}
-        self.memory = InMemoryMemory()
-
-        # 内置查询工具
-        self.builtin_tools = {
-            "weather": self._query_weather,
-            "time": self._query_time,
-            "date": self._query_date,
-            "traffic": self._query_traffic,
-        }
-
-        # 搜索超时配置
-        self.search_timeout = 10.0
 
     async def reply(self, x: Optional[Union[Msg, List[Msg]]] = None) -> Msg:
         """处理信息查询请求"""
@@ -96,7 +118,6 @@ class InfoQueryAgent(AgentBase):
 
         query = x.content if hasattr(x, 'content') else str(x)
 
-        # 检测查询类型并执行
         try:
             result = await asyncio.wait_for(
                 self._dispatch_query(query),
@@ -122,22 +143,9 @@ class InfoQueryAgent(AgentBase):
         )
 
     def _detect_query_type(self, query: str) -> tuple:
-        """检测查询类型"""
+        """检测查询类型和参数"""
         query_lower = query.lower()
-
-        # 地点列表
         locations = ["北京", "上海", "杭州", "深圳", "广州", "成都", "重庆", "西安", "武汉", "南京", "天津", "苏州"]
-
-        # 天气查询
-        if any(kw in query_lower for kw in ["天气", "weather", "温度", "气温"]):
-            # 先提取地点
-            found_location = None
-            for loc in locations:
-                if loc in query:
-                    found_location = loc
-                    break
-            # 如果没找到具体地点，返回默认位置
-            return "weather", found_location or "北京"
 
         # 时间查询
         if any(kw in query_lower for kw in ["时间", "几点", "now", "clock"]):
@@ -147,73 +155,91 @@ class InfoQueryAgent(AgentBase):
         if any(kw in query_lower for kw in ["日期", "几号", "date", "今天"]):
             return "date", ""
 
-        # 交通查询
-        if any(kw in query_lower for kw in ["交通", "路况", "堵车", "traffic"]):
-            found_location = None
-            for loc in locations:
-                if loc in query:
-                    found_location = loc
-                    break
-            return "traffic", found_location or "当前"
-
-        # 通用搜索
-        return "search", query
+        # 其他查询类型让Skill匹配决定
+        return "generic", query
 
     async def _dispatch_query(self, query: str) -> Dict:
-        """分发查询到对应工具"""
+        """分发查询 - 优先内置工具，其次动态匹配Skill，最后DuckDuckGo"""
         query_type, param = self._detect_query_type(query)
 
+        # 内置工具
         if query_type in self.builtin_tools:
             return await self.builtin_tools[query_type](param)
 
-        # 默认执行搜索
+        # 动态匹配Skill
+        matched_skills = self.skill_loader.match_skills(query)
+
+        if matched_skills:
+            # 尝试按优先级调用匹配的Skill
+            for skill in matched_skills:
+                result = await self._try_invoke_skill(skill, query)
+                if result and "error" not in result:
+                    return result
+
+        # 所有Skill都失败或没有匹配的Skill，使用DuckDuckGo搜索
         return await self._search_web(query)
 
-    async def _query_weather(self, location: str) -> Dict:
-        """
-        查询天气
-        实际项目中应接入真实天气API
-        """
+    async def _try_invoke_skill(self, skill, query: str) -> Optional[Dict]:
+        """尝试调用Skill的工具"""
         try:
-            # TODO: 接入真实天气API（如和风天气、OpenWeatherMap等）
-            # 这里使用模拟数据作为占位
-            from datetime import datetime
-            hour = datetime.now().hour
+            if not skill.tools:
+                # Skill存在但没有定义工具，打印提示用于调试
+                print(f"Skill {skill.name} 没有定义工具")
+                return None
 
-            # 简单模拟天气
-            weather_conditions = ["晴", "多云", "阴", "小雨"]
-            condition = weather_conditions[hour % 4]
-            temp = 20 + (hour % 10)
+            # 尝试每个工具
+            for tool in skill.tools:
+                if not tool.script_path:
+                    continue
 
-            result = {
-                "tool": "weather",
-                "location": location,
-                "temperature": f"{temp}°C",
-                "condition": condition,
-                "humidity": "55%",
-                "wind": "东南风 2级",
-                "response": f"{location}今天天气{condition}，{temp}°C，湿度55%，适合出行"
-            }
+                # 提取查询参数
+                params = self._extract_params(tool.name, query)
 
-            # 尝试真实搜索（带超时保护）
-            try:
-                result_from_search = await asyncio.wait_for(
-                    self._search_web(f"{location}今天天气"),
-                    timeout=self.search_timeout
-                )
-                if "error" not in result_from_search and result_from_search.get("response"):
-                    result = result_from_search
-            except (asyncio.TimeoutError, Exception):
-                pass
-
-            return result
+                result = await self.skill_loader.invoke_tool(tool, params)
+                if result and "error" not in result:
+                    result["skill"] = skill.name
+                    result["tool"] = tool.name
+                    return result
 
         except Exception as e:
-            return {
-                "tool": "weather",
-                "error": str(e),
-                "response": f"查询天气失败: {str(e)}"
-            }
+            print(f"Skill {skill.name} 调用失败: {e}")
+
+        return None
+
+    def _extract_params(self, tool_name: str, query: str) -> Dict:
+        """从查询中提取工具参数"""
+        params = {}
+
+        # 根据工具名称决定提取什么参数
+        tool_lower = tool_name.lower()
+
+        if "weather" in tool_lower:
+            locations = ["北京", "上海", "杭州", "深圳", "广州", "成都", "重庆", "西安", "武汉", "南京", "天津", "苏州"]
+            for loc in locations:
+                if loc in query:
+                    params["location"] = loc
+                    break
+            if "location" not in params:
+                params["location"] = "北京"
+
+        if "search" in tool_lower or "query" in tool_lower or "dianping" in tool_lower:
+            params["keyword"] = query
+            params["query"] = query
+
+        if "traffic" in tool_lower or "map" in tool_lower:
+            locations = ["北京", "上海", "杭州", "深圳", "广州", "成都", "重庆", "西安", "武汉", "南京", "天津", "苏州"]
+            for loc in locations:
+                if loc in query:
+                    params["location"] = loc
+                    break
+            if "location" not in params:
+                params["location"] = "当前"
+
+        # 默认参数
+        if not params:
+            params["query"] = query
+
+        return params
 
     async def _query_time(self, _: str) -> Dict:
         """查询当前时间"""
@@ -250,52 +276,21 @@ class InfoQueryAgent(AgentBase):
                 "response": "查询日期失败"
             }
 
-    async def _query_traffic(self, location: str) -> Dict:
-        """
-        查询交通/路况
-        实际项目中应接入地图API（如高德、百度）
-        """
-        # TODO: 接入真实地图API
-        try:
-            return {
-                "tool": "traffic",
-                "location": location,
-                "status": "畅通",
-                "congestion_level": "低",
-                "response": f"{location}当前交通状况良好，道路畅通"
-            }
-        except Exception as e:
-            return {
-                "tool": "traffic",
-                "error": str(e),
-                "response": f"查询交通失败: {str(e)}"
-            }
-
     async def _search_web(self, query: str) -> Dict:
         """
-        执行网络搜索
-        使用DuckDuckGo
+        DuckDuckGo搜索 - 通用后备方案
+        当没有匹配的Skill或Skill调用失败时使用
         """
         try:
-            # 检查是否有ddgs库
-            try:
-                from duckduckgo_search import AsyncDDGS
-            except ImportError:
-                return {
-                    "tool": "search",
-                    "query": query,
-                    "error": "搜索功能需要安装ddgs库",
-                    "install_hint": "pip install ddgs",
-                    "response": "搜索功能暂不可用，如需启用请运行: pip install ddgs"
-                }
+            from ddgs import DDGS
 
             results = []
-            async with AsyncDDGS() as ddgs:
-                async for r in ddgs.async_aiterator(query, max_results=3):
+            with DDGS() as ddgs:
+                for r in ddgs.text(query, max_results=5):
                     results.append({
                         "title": r.get("title", ""),
-                        "url": r.get("url", ""),
-                        "snippet": r.get("body", "")[:150]
+                        "url": r.get("href", ""),
+                        "snippet": r.get("body", "")[:200]
                     })
 
             if not results:
@@ -307,31 +302,31 @@ class InfoQueryAgent(AgentBase):
                 }
 
             # 生成摘要
-            summary = results[0].get("snippet", "")
-            if len(results) > 1:
-                summary = f"找到{len(results)}条结果：{results[0]['snippet']}"
+            summary_parts = []
+            for r in results[:3]:
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")[:100]
+                if title and snippet:
+                    summary_parts.append(f"- {title}: {snippet}")
+
+            summary = "\n".join(summary_parts) if summary_parts else results[0].get("snippet", "")
 
             return {
                 "tool": "search",
+                "source": "duckduckgo",
                 "query": query,
                 "results": results,
                 "total": len(results),
-                "response": summary
+                "response": f"通过DuckDuckGo搜索「{query}」找到{len(results)}条结果：\n{summary}"
             }
 
-        except asyncio.TimeoutError:
-            return {
-                "tool": "search",
-                "query": query,
-                "error": "搜索超时",
-                "response": "搜索超时，请稍后重试"
-            }
         except ImportError:
             return {
                 "tool": "search",
                 "query": query,
-                "error": "搜索库未安装",
-                "response": "搜索功能暂不可用"
+                "error": "搜索库ddgs未安装",
+                "install_hint": "pip install ddgs",
+                "response": "搜索功能暂不可用，请运行: pip install ddgs"
             }
         except Exception as e:
             return {
@@ -340,10 +335,3 @@ class InfoQueryAgent(AgentBase):
                 "error": str(e),
                 "response": f"搜索失败: {str(e)[:50]}"
             }
-
-    # ==================== Skill预留位置 ====================
-
-    # TODO: weather_api_skill - 接入真实天气API
-    # TODO: map_api_skill - 接入地图API（路况、公交）
-    # TODO: news_skill - 新闻查询
-    # TODO: stock_skill - 股票查询
